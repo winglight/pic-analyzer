@@ -72,24 +72,50 @@ async def process_image(base64_image):
     return {'green': green_result, 'red': red_result}
 
 async def send_telegram_message(result, file_path):
-    """Send analysis results to Telegram"""
+    """Send analysis results to Telegram if conditions are met"""
     try:
-        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        # Parse green and red results
+        green_result = json.loads(result['green'])
+        red_result = json.loads(result['red'])
         
-        # Prepare message text
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        message = f"🔄 New Analysis Result ({timestamp})\n\n"
-        message += f"📊 Green Analysis:\n{result['green']}\n\n"
-        message += f"📊 Red Analysis:\n{result['red']}\n\n"
-        message += f"🖼 Image: {os.path.basename(file_path)}"
+        # Check conditions
+        conditions = {
+            'condition1': green_result.get('condition1', False),
+            'condition2': green_result.get('condition2', False),
+            'condition3': green_result.get('condition3', False)
+        }
         
-        # Send message and image
-        async with app:
-            await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-            with open(file_path, 'rb') as photo:
-                await app.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo)
+        # Count true conditions
+        true_conditions = sum(conditions.values())
+        
+        # Only send message if 2 or more conditions are true
+        if true_conditions >= 2:
+            app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+            
+            # Prepare message text
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            message = f"🔄 New Analysis Result ({timestamp})\n\n"
+            message += "✅ Conditions Met:\n"
+            for condition, is_true in conditions.items():
+                emoji = "✓" if is_true else "✗"
+                message += f"{emoji} {condition}\n"
+            message += f"\n📊 Green Analysis:\n{json.dumps(green_result, indent=2)}\n\n"
+            message += f"📊 Red Analysis:\n{json.dumps(red_result, indent=2)}\n\n"
+            message += f"🖼 Image: {os.path.basename(file_path)}"
+            
+            # Send message and image
+            async with app:
+                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+                with open(file_path, 'rb') as photo:
+                    await app.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo)
+            return True
+        else:
+            print(f"Message not sent: Only {true_conditions} conditions met")
+            return False
+            
     except Exception as e:
         print(f"Failed to send Telegram message: {str(e)}")
+        return False
 
 def cleanup_old_tasks():
     """清理超过30分钟的旧任务"""
