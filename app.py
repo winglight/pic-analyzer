@@ -3,18 +3,16 @@ from flask_cors import CORS
 import os
 from datetime import datetime, timedelta
 import secrets
-import requests
 from dotenv import load_dotenv
 import base64
 import json
 import asyncio
 import aiohttp
-from functools import partial
 from multiprocessing import Process, Manager
 import uuid
 import gc
 from models import init_db, TaskDB
-import sqlite3
+from telegram.ext import ApplicationBuilder
 
 load_dotenv()  # Load environment variables
 
@@ -24,6 +22,8 @@ PROMPT_GREEN = os.getenv('PROMPT_GREEN')
 PROMPT_RED = os.getenv('PROMPT_RED')
 UPLOAD_DIR = os.getenv('UPLOAD_DIR')
 VALID_TOKEN = os.getenv('VALID_TOKEN')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
@@ -71,6 +71,26 @@ async def process_image(base64_image):
     green_result, red_result = await asyncio.gather(*tasks)
     return {'green': green_result, 'red': red_result}
 
+async def send_telegram_message(result, file_path):
+    """Send analysis results to Telegram"""
+    try:
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Prepare message text
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        message = f"🔄 New Analysis Result ({timestamp})\n\n"
+        message += f"📊 Green Analysis:\n{result['green']}\n\n"
+        message += f"📊 Red Analysis:\n{result['red']}\n\n"
+        message += f"🖼 Image: {os.path.basename(file_path)}"
+        
+        # Send message and image
+        async with app:
+            await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+            with open(file_path, 'rb') as photo:
+                await app.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo)
+    except Exception as e:
+        print(f"Failed to send Telegram message: {str(e)}")
+
 def cleanup_old_tasks():
     """清理超过30分钟的旧任务"""
     current_time = datetime.now()
@@ -82,13 +102,15 @@ def cleanup_old_tasks():
         if task_id in tasks_status:
             del tasks_status[task_id]
 
-def run_async_task(task_id, base64_image):
+def run_async_task(task_id, base64_image, file_path):
     """在新进程中运行异步任务"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(process_image(base64_image))
         TaskDB.update_task(task_id, 'completed', result=result)
+        # Send telegram message
+        loop.run_until_complete(send_telegram_message(result, file_path))
     except Exception as e:
         TaskDB.update_task(task_id, 'failed', error=str(e))
     finally:
@@ -138,7 +160,7 @@ def upload_screenshot():
 
         # Start processing in new process
         cleanup_old_tasks()  # 清理旧任务
-        process = Process(target=run_async_task, args=(task_id, base64_image))
+        process = Process(target=run_async_task, args=(task_id, base64_image, file_path))
         process.daemon = True  # 设置为守护进程
         process.start()
 
