@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from functools import wraps
 import os
 from datetime import datetime, timedelta
 import secrets
@@ -8,7 +9,7 @@ import base64
 import json
 import asyncio
 import aiohttp
-from multiprocessing import Process, Manager
+from multiprocessing import Process, Manager, freeze_support
 import uuid
 import gc
 from models import init_db, TaskDB
@@ -24,6 +25,7 @@ UPLOAD_DIR = os.getenv('UPLOAD_DIR')
 VALID_TOKEN = os.getenv('VALID_TOKEN')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+HTTP_PROXY = os.getenv('HTTP_PROXY')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
@@ -34,8 +36,24 @@ CORS(app, resources={r"/*": {
     "allow_headers": ["Authorization"]
 }})
 
-manager = Manager()
-tasks_status = manager.dict()
+def require_token(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No token provided'}), 401
+        
+        token = auth_header.split(' ')[1]
+        if token != VALID_TOKEN:
+            return jsonify({'error': 'Invalid token'}), 401
+            
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+
+manager = None
+tasks_status = None
 
 init_db()
 
@@ -75,8 +93,8 @@ async def send_telegram_message(result, file_path):
     """Send analysis results to Telegram if conditions are met"""
     try:
         # Parse green and red results
-        green_result = json.loads(result['green'])
-        red_result = json.loads(result['red'])
+        green_result = result['green']
+        red_result = result['red']
         
         # Check conditions
         conditions = {
@@ -90,7 +108,7 @@ async def send_telegram_message(result, file_path):
         
         # Only send message if 2 or more conditions are true
         if true_conditions >= 2:
-            app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+            app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).proxy_url(HTTP_PROXY if HTTP_PROXY else None).build()
             
             # Prepare message text
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -143,23 +161,27 @@ def run_async_task(task_id, base64_image, file_path):
         loop.close()
         gc.collect()  # 清理内存
 
-@app.route('/upload', methods=['POST', 'OPTIONS'])
+@app.route('/upload', methods=['OPTIONS'])
+def handle_options_request():
+    """Handle OPTIONS request with CORS headers"""
+    response = jsonify({'message': 'Preflight request'})
+    response.headers.add('Access-Control-Allow-Origin', 'https://www.tradingview.com')
+    response.headers.add('Access-Control-Allow-Headers', 'Authorization')
+    return response, 200
+
+@app.route('/upload', methods=['POST'])
+@require_token
 def upload_screenshot():
-    if request.method == 'OPTIONS':
-        response = jsonify({'message': 'Preflight request'})
-        response.headers.add('Access-Control-Allow-Origin', 'https://www.tradingview.com')
-        response.headers.add('Access-Control-Allow-Headers', 'Authorization')
-        return response, 200
 
     try:
         # Validate token
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'No token provided'}), 401
+        # auth_header = request.headers.get('Authorization')
+        # if not auth_header or not auth_header.startswith('Bearer '):
+        #     return jsonify({'error': 'No token provided'}), 401
         
-        token = auth_header.split(' ')[1]
-        if token != VALID_TOKEN:
-            return jsonify({'error': 'Invalid token'}), 401
+        # token = auth_header.split(' ')[1]
+        # if token != VALID_TOKEN:
+        #     return jsonify({'error': 'Invalid token'}), 401
 
         # Validate file
         if 'screenshot' not in request.files:
@@ -248,4 +270,7 @@ def get_image(file_path):
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
+    freeze_support()
+    manager = Manager()
+    tasks_status = manager.dict()
     app.run(host='0.0.0.0', port=5005, debug=True)
