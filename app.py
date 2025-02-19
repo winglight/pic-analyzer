@@ -108,7 +108,7 @@ async def send_telegram_message(result, file_path):
         
         # Only send message if 2 or more conditions are true
         if true_conditions >= 2:
-            app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).proxy_url(HTTP_PROXY if HTTP_PROXY else None).build()
+            app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).proxy(HTTP_PROXY if HTTP_PROXY else None).build()
             
             # Prepare message text
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -146,21 +146,61 @@ def cleanup_old_tasks():
         if task_id in tasks_status:
             del tasks_status[task_id]
 
+# Modify run_async_task function to save telegram sending status
 def run_async_task(task_id, base64_image, file_path):
     """在新进程中运行异步任务"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(process_image(base64_image))
-        TaskDB.update_task(task_id, 'completed', result=result)
         # Send telegram message
-        loop.run_until_complete(send_telegram_message(result, file_path))
+        telegram_sent = loop.run_until_complete(send_telegram_message(result, file_path))
+        TaskDB.update_task(task_id, 'completed', 
+                          result=result, 
+                          telegram_sent=telegram_sent)
     except Exception as e:
-        TaskDB.update_task(task_id, 'failed', error=str(e))
+        TaskDB.update_task(task_id, 'failed', 
+                          error=str(e),
+                          telegram_sent=False)
     finally:
         loop.close()
-        gc.collect()  # 清理内存
+        gc.collect()
 
+@app.route('/task/<task_id>/resend', methods=['POST'])
+@require_token
+def resend_telegram(task_id):
+    """Resend telegram message for a specific task"""
+    try:
+        task = TaskDB.get_task(task_id)
+        if not task:
+            return jsonify({'error': 'Task not found'}), 404
+            
+        if task['status'] != 'completed':
+            return jsonify({'error': 'Cannot resend message for incomplete task'}), 400
+
+        # Create new event loop and run async function
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # Resend telegram message
+            telegram_sent = loop.run_until_complete(send_telegram_message(task['result'], task['file_path']))
+            
+            # Update task status
+            TaskDB.update_task(task_id, 'completed', 
+                             result=task['result'], 
+                             telegram_sent=telegram_sent)
+            
+            return jsonify({
+                'success': telegram_sent,
+                'message': 'Telegram message resent successfully' if telegram_sent 
+                          else 'Failed to resend telegram message'
+            })
+        finally:
+            loop.close()
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
 @app.route('/upload', methods=['OPTIONS'])
 def handle_options_request():
     """Handle OPTIONS request with CORS headers"""
@@ -225,17 +265,11 @@ def upload_screenshot():
         return response, 500
 
 @app.route('/task/<task_id>', methods=['GET'])
-def check_task_status(task_id):
-    """检查任务状态的路由"""
-    if task_id not in tasks_status:
+def get_task(task_id):
+    task = TaskDB.get_task(task_id)
+    if not task:
         return jsonify({'error': 'Task not found'}), 404
-    
-    task = tasks_status[task_id]
-    return jsonify({
-        'status': task['status'],
-        'result': task.get('result') if task['status'] == 'completed' else None,
-        'error': task.get('error') if task['status'] == 'failed' else None
-    })
+    return jsonify(task)
 
 @app.route('/tasks', methods=['GET'])
 def list_tasks():
