@@ -1,0 +1,18 @@
+name = "pic-analyzer"
+main = "src/index.js"
+compatibility_date = "2023-10-30"
+
+# KV 命名空间配置
+[[kv_namespaces]]
+binding = "pic_analyzer"
+id = "7ff80e39679c481f91dc7ceb565fa8e5"
+preview_id = "e84ddb41f5964db6a0a1535ec6d9334f"
+
+# 环境变量配置
+[vars]
+VALID_TOKEN = "upkeobuyyAmYp0aVMFQylu9gNIug3WWCAgVkJPbXNAtkd5wiVPAYSUL5GWHwXt"
+CLOUDFLARE_ACCOUNT_ID = "3b3e4a544314a7b00b0fc133acacd328"
+CLOUDFLARE_AUTH_TOKEN = "TP0P5a3dEyiJRKk5ox782isWm-dyMLVYvRpI3YdL"
+CLOUDFLARE_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
+TELEGRAM_BOT_TOKEN = "8172891882:AAFD_8nXyCOyob4DgidbwtrZKmqnWYMgnDg"
+TELEGRAM_CHAT_ID = "6739004011"
