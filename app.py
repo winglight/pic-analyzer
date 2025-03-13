@@ -17,10 +17,20 @@ from telegram.ext import ApplicationBuilder
 
 load_dotenv()  # Load environment variables
 
+# Ollama 配置
 OLLAMA_API_URL = os.getenv('OLLAMA_API_URL')
 MODEL = os.getenv('MODEL')
 PROMPT_GREEN = os.getenv('PROMPT_GREEN')
 PROMPT_RED = os.getenv('PROMPT_RED')
+PROMPT_DIP = os.getenv('PROMPT_DIP')
+
+# Cloudflare Workers AI 配置
+USE_CLOUDFLARE_AI = os.getenv('USE_CLOUDFLARE_AI', 'false').lower() == 'true'
+CLOUDFLARE_ACCOUNT_ID = os.getenv('CLOUDFLARE_ACCOUNT_ID')
+CLOUDFLARE_AUTH_TOKEN = os.getenv('CLOUDFLARE_AUTH_TOKEN')
+CLOUDFLARE_MODEL = os.getenv('CLOUDFLARE_MODEL', '@cf/meta/llama-3.2-11b-vision-instruct')
+
+# 其他配置
 UPLOAD_DIR = os.getenv('UPLOAD_DIR')
 VALID_TOKEN = os.getenv('VALID_TOKEN')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -61,74 +71,263 @@ async def call_ollama_api(base64_image, prompt):
     """
     Async function to call Ollama API
     """
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "images": [base64_image]
-    }
+    try:
+        if USE_CLOUDFLARE_AI:
+            return await call_cloudflare_ai(base64_image, prompt)
+        
+        payload = {
+            "model": MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "images": [base64_image]
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                OLLAMA_API_URL,
+                json=payload,
+                headers={'Content-Type': 'application/json'}
+            ) as response:
+                content = await response.text()
+                return json.loads(json.loads(content)["response"])
+    except Exception as e:
+        print(f"Error in call_ollama_api: {str(e)}")
+        raise
+
+# 添加一个标志来跟踪是否已同意条款
+CLOUDFLARE_AGREEMENT_SENT = True
+
+async def call_cloudflare_ai(base64_image, prompt):
+    """
+    Async function to call Cloudflare Workers AI
+    """
+    global CLOUDFLARE_AGREEMENT_SENT
     
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            OLLAMA_API_URL,
-            json=payload,
-            headers={'Content-Type': 'application/json'}
-        ) as response:
-            content = await response.text()
-            return json.loads(json.loads(content)["response"])
+    try:
+        url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_MODEL}"
+        
+        # 如果尚未同意条款，先发送同意请求
+        if not CLOUDFLARE_AGREEMENT_SENT:
+            agreement_payload = {
+                "prompt": "agree"
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {CLOUDFLARE_AUTH_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            
+            print("Sending agreement to Cloudflare Workers AI...")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=agreement_payload, headers=headers) as response:
+                    agreement_result = await response.json()
+                    # 将Unicode编码转为正常字符再打印
+                    pretty_result = json.dumps(agreement_result, indent=2, ensure_ascii=False)[:200]
+                    print(f"Agreement response: {pretty_result}...")
+                    
+                    # 标记为已同意，无论结果如何
+                    CLOUDFLARE_AGREEMENT_SENT = True
+                    
+                    # 如果同意失败，可能需要进一步处理
+                    if not agreement_result.get('success', False):
+                        print(f"Warning: Agreement may have failed: {json.dumps(agreement_result)}")
+                        # 如果消息中包含"Thank you for agreeing"，则认为同意成功
+                        if any("Thank you for agreeing" in error.get("message", "") 
+                              for error in agreement_result.get("errors", [])):
+                            print("Agreement appears to be successful despite error response")
+        
+        # 修改图像编码方式
+        # 确保base64字符串不包含前缀
+        if "," in base64_image:
+            base64_image = base64_image.split(",", 1)[1]
+        
+        # 将base64转换为二进制字符串
+        image_bytes = base64.b64decode(base64_image)
+        image_array = [b for b in image_bytes]  # 转换为0-255的整数数组
+        
+        # 构建请求负载 - 使用二进制字符串格式
+        payload = {
+            "prompt": prompt,
+            "image": image_array,
+            "temperature": 0.7,
+            "max_tokens": 1024,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                "type": "object",
+                "properties": {
+                    "condition1": {
+                    "type": "boolean"
+                    },
+                    "condition2": {
+                    "type": "boolean"
+                    },
+                    "condition3": {
+                    "type": "boolean"
+                    }
+                    }
+                },
+                "required": [
+                    "condition1",
+                    "condition2",
+                    "condition3"
+                ]
+                }
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {CLOUDFLARE_AUTH_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        timeout = aiohttp.ClientTimeout(total=60)  # 设置60秒超时
+        connector = aiohttp.TCPConnector(ssl=False)  # 禁用SSL验证以避免某些SSL问题
+        
+        print(f"Sending request to Cloudflare Workers AI: {url}")
+        print(f"Using direct image_data format")
+        
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            async with session.post(url, json=payload, headers=headers) as response:
+                result = await response.json()
+                
+                # 将Unicode编码转为正常字符再打印
+                pretty_result = json.dumps(result, indent=2, ensure_ascii=False)[:500]
+                print(f"Cloudflare API response: {pretty_result}...")
+                
+                if 'result' not in result or not result.get('success', False):
+                    # 尝试另一种格式 - 这里保留作为备用，但修改了图片格式
+                    print("First attempt failed, trying alternative format...")
+                    
+                    # 尝试另一种格式
+                    alt_payload = {
+                        "prompt": prompt,
+                        "image": f"data:image/png;base64,{base64_image}"
+                    }
+                    
+                    async with session.post(url, json=alt_payload, headers=headers) as alt_response:
+                        alt_result = await alt_response.json()
+                        # 将Unicode编码转为正常字符再打印
+                        pretty_alt_result = json.dumps(alt_result, indent=2, ensure_ascii=False)[:500]
+                        print(f"Alternative format response: {pretty_alt_result}...")
+                        
+                        if 'result' not in alt_result or not alt_result.get('success', False):
+                            raise Exception(f"Cloudflare API error: {json.dumps(result, ensure_ascii=False)}")
+                        result = alt_result
+                
+                # 尝试从响应中提取JSON
+                response_text = result['result'].get('response', result['result'])
+                try:
+                    # 尝试直接解析为JSON
+                    if isinstance(response_text, dict):
+                        return response_text
+                    else:
+                        return json.loads(response_text)
+                except json.JSONDecodeError:
+                    # 如果不是直接的JSON，尝试从文本中提取JSON部分
+                    import re
+                    json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+                    if json_match:
+                        return json.loads(json_match.group(1))
+                    else:
+                        # 尝试提取任何看起来像JSON的部分
+                        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                        if json_match:
+                            try:
+                                return json.loads(json_match.group(0))
+                            except:
+                                pass
+                        
+                        # 如果无法提取JSON，返回一个错误对象
+                        return {
+                            "error": "无法从响应中提取JSON",
+                            "raw_response": response_text
+                        }
+    except Exception as e:
+        print(f"Error in call_cloudflare_ai: {str(e)}")
+        raise
 
 async def process_image(base64_image):
     """
-    Process image with both green and red prompts
+    Process image with green, red and dip prompts
     """
     tasks = [
         call_ollama_api(base64_image, PROMPT_GREEN),
-        call_ollama_api(base64_image, PROMPT_RED)
+        call_ollama_api(base64_image, PROMPT_RED),
+        call_ollama_api(base64_image, PROMPT_DIP)
     ]
-    green_result, red_result = await asyncio.gather(*tasks)
-    return {'green': green_result, 'red': red_result}
+    green_result, red_result, dip_result = await asyncio.gather(*tasks)
+    return {
+        'green': green_result, 
+        'red': red_result,
+        'dip': dip_result
+    }
 
 async def send_telegram_message(result, file_path):
     """Send analysis results to Telegram if conditions are met"""
     try:
-        # Parse green and red results
+        # Parse results
         green_result = result['green']
         red_result = result['red']
+        dip_result = result['dip']
         
-        # Check conditions
+        # Check conditions for each type
         conditions = {
-            'condition1': green_result.get('condition1', False),
-            'condition2': green_result.get('condition2', False),
-            'condition3': green_result.get('condition3', False)
+            'green_condition1': green_result.get('condition1', False),
+            'green_condition2': green_result.get('condition2', False),
+            'green_condition3': green_result.get('condition3', False),
+            'dip_condition1': dip_result.get('condition1', False),
+            'dip_condition2': dip_result.get('condition2', False),
+            'dip_condition3': dip_result.get('condition3', False)
         }
         
-        # Count true conditions
-        true_conditions = sum(conditions.values())
+        # Count true conditions for each type
+        green_conditions = sum(1 for k, v in conditions.items() if k.startswith('green_') and v)
+        dip_conditions = sum(1 for k, v in conditions.items() if k.startswith('dip_') and v)
         
-        # Only send message if 2 or more conditions are true
-        if true_conditions >= 2:
+        # Send message if either green or dip conditions are met
+        if green_conditions >= 2 or dip_conditions >= 2:
             app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).proxy(HTTP_PROXY if HTTP_PROXY else None).build()
             
             # Prepare message text
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             message = f"🔄 New Analysis Result ({timestamp})\n\n"
-            message += "✅ Conditions Met:\n"
-            for condition, is_true in conditions.items():
-                emoji = "✓" if is_true else "✗"
-                message += f"{emoji} {condition}\n"
-            message += f"\n📊 Green Analysis:\n{json.dumps(green_result, indent=2)}\n\n"
-            message += f"📊 Red Analysis:\n{json.dumps(red_result, indent=2)}\n\n"
+            
+            # Add Green conditions if met
+            if green_conditions >= 2:
+                message += "✅ Green Conditions Met:\n"
+                for k, v in conditions.items():
+                    if k.startswith('green_'):
+                        emoji = "✓" if v else "✗"
+                        message += f"{emoji} {k.replace('green_', '')}\n"
+                message += f"\n📊 Green Analysis:\n{json.dumps(green_result, indent=2)}\n\n"
+            
+            # Add Dip conditions if met
+            if dip_conditions >= 2:
+                message += "📉 Dip Conditions Met:\n"
+                for k, v in conditions.items():
+                    if k.startswith('dip_'):
+                        emoji = "✓" if v else "✗"
+                        message += f"{emoji} {k.replace('dip_', '')}\n"
+                message += f"\n📊 Dip Analysis:\n{json.dumps(dip_result, indent=2)}\n\n"
+            
             message += f"🖼 Image: {os.path.basename(file_path)}"
             
-            # Send message and image
+            # Send message and image with timeout
             async with app:
-                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+                await app.bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID, 
+                    text=message
+                )
                 with open(file_path, 'rb') as photo:
-                    await app.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=photo)
+                    await app.bot.send_photo(
+                        chat_id=TELEGRAM_CHAT_ID, 
+                        photo=photo
+                    )
             return True
         else:
-            print(f"Message not sent: Only {true_conditions} conditions met")
+            print(f"Message not sent: Green conditions: {green_conditions}, Dip conditions: {dip_conditions}")
             return False
             
     except Exception as e:
@@ -149,20 +348,34 @@ def cleanup_old_tasks():
 # Modify run_async_task function to save telegram sending status
 def run_async_task(task_id, base64_image, file_path):
     """在新进程中运行异步任务"""
+    # 创建新的事件循环
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    
     try:
+        # 使用 run_until_complete 运行协程
         result = loop.run_until_complete(process_image(base64_image))
-        # Send telegram message
+        
+        # 发送 Telegram 消息
         telegram_sent = loop.run_until_complete(send_telegram_message(result, file_path))
+        
+        # 更新任务状态
         TaskDB.update_task(task_id, 'completed', 
                           result=result, 
                           telegram_sent=telegram_sent)
     except Exception as e:
+        print(f"Error in run_async_task: {str(e)}")
         TaskDB.update_task(task_id, 'failed', 
                           error=str(e),
                           telegram_sent=False)
     finally:
+        # 确保所有待处理的任务都已完成
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        
+        # 关闭事件循环
+        loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
         gc.collect()
 
@@ -178,14 +391,14 @@ def resend_telegram(task_id):
         if task['status'] != 'completed':
             return jsonify({'error': 'Cannot resend message for incomplete task'}), 400
 
-        # Create new event loop and run async function
+        # 创建新事件循环并运行异步函数
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            # Resend telegram message
+            # 重新发送 Telegram 消息
             telegram_sent = loop.run_until_complete(send_telegram_message(task['result'], task['file_path']))
             
-            # Update task status
+            # 更新任务状态
             TaskDB.update_task(task_id, 'completed', 
                              result=task['result'], 
                              telegram_sent=telegram_sent)
@@ -196,6 +409,13 @@ def resend_telegram(task_id):
                           else 'Failed to resend telegram message'
             })
         finally:
+            # 确保所有待处理的任务都已完成
+            pending = asyncio.all_tasks(loop)
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            
+            # 关闭事件循环
+            loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
 
     except Exception as e:
