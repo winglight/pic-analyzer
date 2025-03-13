@@ -16,7 +16,7 @@
 
 // 分析提示词
 const PROMPT_GREEN = `分析附件图片,仅仅考虑蜡烛图中最靠右的11个bar的范围内,是否满足以下三个条件：
- 1. 是否出现从上到下垂直的绿色柱子(不同于OCHL bar)
+ 1. 是否出现从上到下贯彻整个图片的垂直的绿色柱子
  2. 判断柱子右侧是否出现了小一些的"Buy"绿色标记
  3. 判断柱子右侧是否出现了更大一些的"Buy"绿色标记
 
@@ -24,11 +24,11 @@ const PROMPT_GREEN = `分析附件图片,仅仅考虑蜡烛图中最靠右的11�
  {
     "condition1": true, 
     "condition2": true, 
-    "condition3": true, 
+    "condition3": true 
 }`;
 
 const PROMPT_RED = `分析附件图片,仅仅考虑蜡烛图中最靠右的11个bar的范围内,是否满足以下三个条件：
- 1. 是否出现从上到下垂直的红色柱子(不同于OCHL bar)
+ 1. 是否出现从上到下贯彻整个图片的垂直的红色柱子
  2. 判断柱子右侧是否出现了小一些的"Sell"红色标记
  3. 判断柱子右侧是否出现了更大一些的"Sell"红色标记
 
@@ -36,19 +36,19 @@ const PROMPT_RED = `分析附件图片,仅仅考虑蜡烛图中最靠右的11个
  {
     "condition1": true, 
     "condition2": true, 
-    "condition3": true, 
+    "condition3": true 
 }`;
 
 const PROMPT_DIP = `分析附件图片,仅仅考虑蜡烛图中最靠右的11个bar的范围内,是否满足以下三个条件：
- 1. 是否出现远超前面高度的红色柱子
- 2. 判断是否连续出现远三个远超前面高度的红色柱子
- 3. 判断最右侧是否出现了较高的绿色柱子，且Vol值较高
+ 1. 是否出现远超前面高度的红色bar
+ 2. 判断是否连续出现远三个远超前面高度的红色bar
+ 3. 判断最右侧是否出现了较高的绿色bar，且Vol值较高
 
  返回结果为json格式，如下：
  {
     "condition1": true, 
     "condition2": true, 
-    "condition3": true, 
+    "condition3": true 
 }`;
 
 // KV 存储用于任务状态
@@ -248,9 +248,22 @@ async function sendTelegramMessage(result, imageData, env) {
         .length;
     }
     
+    // 检查红色条件
+    let red_conditions = 0;
+    
+    if (result.red && typeof result.red === 'object') {
+      conditions.red_condition1 = result.red.condition1 === true;
+      conditions.red_condition2 = result.red.condition2 === true;
+      conditions.red_condition3 = result.red.condition3 === true;
+      
+      red_conditions = Object.values(conditions)
+        .filter(v => v === true && Object.keys(conditions).find(k => conditions[k] === v).startsWith('red_'))
+        .length;
+    }
+    
     // 如果条件不满足，不发送消息
-    if (green_conditions < 2 && dip_conditions < 2) {
-      console.log(`Message not sent: Green conditions: ${green_conditions}, Dip conditions: ${dip_conditions}`);
+    if (green_conditions < 3 && red_conditions < 3 && dip_conditions < 3) {
+      console.log(`Message not sent: Green conditions: ${green_conditions}, Red conditions: ${red_conditions}, Dip conditions: ${dip_conditions}`);
       return false;
     }
     
@@ -259,7 +272,7 @@ async function sendTelegramMessage(result, imageData, env) {
     let message = `🔄 New Analysis Result (${timestamp})\n\n`;
     
     // 添加绿色条件
-    if (green_conditions >= 2) {
+    if (green_conditions >= 3) {
       message += "✅ Green Conditions Met:\n";
       for (const [k, v] of Object.entries(conditions)) {
         if (k.startsWith('green_')) {
@@ -270,8 +283,20 @@ async function sendTelegramMessage(result, imageData, env) {
       message += `\n📊 Green Analysis:\n${JSON.stringify(result.green, null, 2)}\n\n`;
     }
     
+    // 如果红色条件满足，添加到消息中
+    if (red_conditions >= 3) {
+      message += "🔴 Red Conditions Met:\n";
+      for (const [k, v] of Object.entries(conditions)) {
+        if (k.startsWith('red_')) {
+          const emoji = v ? "✓" : "✗";
+          message += `${emoji} ${k.replace('red_', '')}\n`;
+        }
+      }
+      message += `\n📊 Red Analysis:\n${JSON.stringify(result.red, null, 2)}\n\n`;
+    }
+    
     // 添加下跌条件
-    if (dip_conditions >= 2) {
+    if (dip_conditions >= 3) {
       message += "📉 Dip Conditions Met:\n";
       for (const [k, v] of Object.entries(conditions)) {
         if (k.startsWith('dip_')) {
@@ -402,6 +427,20 @@ async function handleUpload(request, env) {
           }), {
             expirationTtl: 60 * 60 * 24 // 24小时过期
           });
+
+          return new Response(JSON.stringify({
+            task_id: taskId,
+            status: 'completed',
+            message: result
+          }), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': 'https://www.tradingview.com',
+              'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+              'Access-Control-Allow-Headers': 'Authorization'
+            }
+          });
         } catch (error) {
           console.error(`Error processing task ${taskId}: ${error.message}`);
           
@@ -416,23 +455,23 @@ async function handleUpload(request, env) {
           }), {
             expirationTtl: 60 * 60 * 24 // 24小时过期
           });
+
+          return new Response(JSON.stringify({
+            task_id: taskId,
+            status: 'failed',
+            message: error.message
+          }), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': 'https://www.tradingview.com',
+              'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+              'Access-Control-Allow-Headers': 'Authorization'
+            }
+          });
         }
       // })();
       
-      // 立即返回响应，不等待处理完成
-      return new Response(JSON.stringify({
-        task_id: taskId,
-        status: 'processing',
-        message: 'Image processing started'
-      }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': 'https://www.tradingview.com',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Authorization'
-        }
-      });
     } catch (error) {
       console.error(`Error in handleUpload: ${error.message}`);
       return new Response(JSON.stringify({ error: error.message }), {
