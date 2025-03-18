@@ -618,6 +618,8 @@ async function handleUpload(request, env) {
       } else if (path.startsWith('/image/') && request.method === 'GET') {
         const taskId = path.split('/')[2];
         return await getTaskImage(taskId, env);
+      } else if (path === '/cleartasks' && request.method === 'POST') {
+        return await clearTasks(request, env);
       } else {
         return new Response(JSON.stringify({ error: 'Not found' }), {
           status: 404,
@@ -733,6 +735,47 @@ async function getTaskImage(taskId, env) {
     });
   } catch (error) {
     console.error(`Error in getTaskImage: ${error.message}`);
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
+ * 清除所有任务数据
+ */
+async function clearTasks(request, env) {
+  try {
+    // 验证 token
+    const tokenValidation = validateToken(request, env);
+    if (!tokenValidation.valid) {
+      return new Response(JSON.stringify({ error: tokenValidation.error }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // 获取所有任务键
+    const taskKeys = await env.pic_analyzer.list({ prefix: 'task:' });
+    
+    // 删除所有任务数据
+    const deletePromises = taskKeys.keys.map(async key => {
+      await env.pic_analyzer.delete(key.name);
+    });
+    
+    await Promise.all(deletePromises);
+    
+    return new Response(JSON.stringify({
+      success: true,
+      message: `已清除 ${taskKeys.keys.length} 条任务数据`,
+      deleted_count: taskKeys.keys.length
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    console.error(`Error in clearTasks: ${error.message}`);
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
