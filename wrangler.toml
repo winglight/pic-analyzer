@@ -8,6 +8,9 @@ binding = "pic_analyzer"
 id = "7ff80e39679c481f91dc7ceb565fa8e5"
 preview_id = "e84ddb41f5964db6a0a1535ec6d9334f"
 
+[observability.logs]
+enabled = true
+
 # 环境变量配置
 [vars]
 VALID_TOKEN = "upkeobuyyAmYp0aVMFQylu9gNIug3WWCAgVkJPbXNAtkd5wiVPAYSUL5GWHwXt"
